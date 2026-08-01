@@ -325,6 +325,12 @@ function doPost(e) {
           data: getConfig_(),
         });
 
+      case 'session.create':
+        return jsonResponse_({
+          ok: true,
+          data: createSession_(body.data),
+        });
+
       default:
         return jsonResponse_({
           ok: false,
@@ -334,6 +340,146 @@ function doPost(e) {
   } catch (error) {
     return errorResponse_(error);
   }
+}
+
+/**
+ * 새 수업방 생성
+ */
+function createSession_(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Invalid session create request.');
+  }
+
+  const title =
+    typeof data.title === 'string'
+      ? data.title.trim()
+      : '';
+  const maxTeams = data.maxTeams;
+
+  if (!title) {
+    throw new Error('Session title is required.');
+  }
+
+  if (
+    typeof maxTeams !== 'number' ||
+    !Number.isInteger(maxTeams) ||
+    maxTeams < 3 ||
+    maxTeams > 7
+  ) {
+    throw new Error('maxTeams must be an integer from 3 to 7.');
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+
+  try {
+    return createSessionWithLock_(title, maxTeams);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function createSessionWithLock_(title, maxTeams) {
+  const sheet = getSpreadsheet_().getSheetByName('SESSIONS');
+
+  if (!sheet) {
+    throw new Error('SESSIONS sheet was not found.');
+  }
+
+  const config = getConfig_();
+  const now = new Date().toISOString();
+  const session = {
+    session_id: Utilities.getUuid(),
+    join_code: createUniqueJoinCode_(),
+    title: title,
+    status: 'active',
+    current_phase: 'lobby',
+    current_round: 0,
+    max_teams: maxTeams,
+    timer_end_at: '',
+    announcement: '',
+    admin_token_hash: '',
+    config_version: config.version,
+    config_snapshot: JSON.stringify(config),
+    created_at: now,
+    updated_at: now,
+  };
+
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastColumn === 0) {
+    throw new Error('SESSIONS headers were not found.');
+  }
+
+  const headers = sheet
+    .getRange(1, 1, 1, lastColumn)
+    .getDisplayValues()[0]
+    .map(function (header) {
+      return String(header).trim();
+    });
+
+  SHEET_SCHEMAS.SESSIONS.forEach(function (header) {
+    if (headers.indexOf(header) === -1) {
+      throw new Error('SESSIONS header was not found: ' + header);
+    }
+  });
+
+  sheet.appendRow(
+    headers.map(function (header) {
+      const value = Object.prototype.hasOwnProperty.call(
+        session,
+        header
+      )
+        ? session[header]
+        : '';
+
+      if (
+        typeof value === 'string' &&
+        /^[=+\-@]/.test(value)
+      ) {
+        return "'" + value;
+      }
+
+      return value;
+    })
+  );
+
+  return {
+    sessionId: session.session_id,
+    joinCode: session.join_code,
+    title: session.title,
+    status: session.status,
+    currentPhase: session.current_phase,
+    currentRound: session.current_round,
+    maxTeams: session.max_teams,
+    createdAt: session.created_at,
+  };
+}
+
+function createUniqueJoinCode_() {
+  const existingCodes = {};
+
+  readRowsAsObjects_('SESSIONS').forEach(function (row) {
+    const code = String(row.join_code || '').trim().toUpperCase();
+
+    if (code) {
+      existingCodes[code] = true;
+    }
+  });
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const candidate = Utilities
+      .getUuid()
+      .replace(/-/g, '')
+      .slice(0, 6)
+      .toUpperCase();
+
+    if (!existingCodes[candidate]) {
+      return candidate;
+    }
+  }
+
+  throw new Error('Could not generate a unique join code.');
 }
 
 /**
