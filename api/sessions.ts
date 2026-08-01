@@ -12,9 +12,11 @@ const JSON_HEADERS = {
 }
 
 type ErrorCode =
+  | 'INVALID_JOIN_CODE'
   | 'INVALID_REQUEST'
   | 'METHOD_NOT_ALLOWED'
   | 'SERVER_MISCONFIGURED'
+  | 'SESSION_NOT_FOUND'
   | 'UNAUTHORIZED'
   | 'UPSTREAM_ERROR'
   | 'UPSTREAM_TIMEOUT'
@@ -24,7 +26,7 @@ type CreateSessionInput = {
   maxTeams: number
 }
 
-type Session = {
+type PublicSession = {
   sessionId: string
   joinCode: string
   title: string
@@ -32,6 +34,9 @@ type Session = {
   currentPhase: string
   currentRound: number
   maxTeams: number
+}
+
+type CreatedSession = PublicSession & {
   createdAt: string
 }
 
@@ -63,12 +68,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null
 }
 
-function getServerConfig() {
+function getUpstreamConfig() {
   const configuredUrl = process.env.APPS_SCRIPT_WEB_APP_URL
   const appsScriptApiSecret = process.env.APPS_SCRIPT_API_SECRET
-  const sessionAdminApiSecret = process.env.SESSION_ADMIN_API_SECRET
 
-  if (!configuredUrl || !appsScriptApiSecret || !sessionAdminApiSecret) {
+  if (!configuredUrl || !appsScriptApiSecret) {
     return null
   }
 
@@ -83,10 +87,14 @@ function getServerConfig() {
       return null
     }
 
-    return { upstreamUrl, appsScriptApiSecret, sessionAdminApiSecret }
+    return { upstreamUrl, appsScriptApiSecret }
   } catch {
     return null
   }
+}
+
+function getSessionAdminSecret() {
+  return process.env.SESSION_ADMIN_API_SECRET || null
 }
 
 function selectInput(value: unknown): CreateSessionInput | null {
@@ -110,12 +118,11 @@ function selectInput(value: unknown): CreateSessionInput | null {
   return { title, maxTeams }
 }
 
-function selectSessionPayload(value: unknown): Session | null {
-  if (!isPlainObject(value) || value.ok !== true || !isPlainObject(value.data)) {
+function selectPublicSessionData(value: unknown): PublicSession | null {
+  if (!isPlainObject(value)) {
     return null
   }
 
-  const data = value.data
   const {
     sessionId,
     joinCode,
@@ -124,8 +131,7 @@ function selectSessionPayload(value: unknown): Session | null {
     currentPhase,
     currentRound,
     maxTeams,
-    createdAt,
-  } = data
+  } = value
 
   if (
     typeof sessionId !== 'string' ||
@@ -134,15 +140,18 @@ function selectSessionPayload(value: unknown): Session | null {
     !/^[A-F0-9]{6}$/.test(joinCode) ||
     typeof title !== 'string' ||
     !title.trim() ||
-    status !== 'active' ||
-    currentPhase !== 'lobby' ||
-    currentRound !== 0 ||
+    typeof status !== 'string' ||
+    !status ||
+    typeof currentPhase !== 'string' ||
+    !currentPhase ||
+    typeof currentRound !== 'number' ||
+    !Number.isInteger(currentRound) ||
+    currentRound < 0 ||
+    currentRound > 2 ||
     typeof maxTeams !== 'number' ||
     !Number.isInteger(maxTeams) ||
     maxTeams < 3 ||
-    maxTeams > 7 ||
-    typeof createdAt !== 'string' ||
-    !Number.isFinite(Date.parse(createdAt))
+    maxTeams > 7
   ) {
     return null
   }
@@ -155,25 +164,132 @@ function selectSessionPayload(value: unknown): Session | null {
     currentPhase,
     currentRound,
     maxTeams,
+  }
+}
+
+function selectCreatedSessionPayload(value: unknown): CreatedSession | null {
+  if (!isPlainObject(value) || value.ok !== true || !isPlainObject(value.data)) {
+    return null
+  }
+
+  const session = selectPublicSessionData(value.data)
+  const createdAt = value.data.createdAt
+
+  if (
+    !session ||
+    session.status !== 'active' ||
+    session.currentPhase !== 'lobby' ||
+    session.currentRound !== 0 ||
+    typeof createdAt !== 'string' ||
+    !Number.isFinite(Date.parse(createdAt))
+  ) {
+    return null
+  }
+
+  return {
+    ...session,
     createdAt,
+  }
+}
+
+async function getPublicSession(request: Request) {
+  const joinCode = new URL(request.url).searchParams
+    .get('joinCode')
+    ?.trim()
+    .toUpperCase()
+
+  if (!joinCode || !/^[A-F0-9]{6}$/.test(joinCode)) {
+    return errorResponse(400, 'INVALID_JOIN_CODE')
+  }
+
+  const upstreamConfig = getUpstreamConfig()
+
+  if (!upstreamConfig) {
+    return errorResponse(500, 'SERVER_MISCONFIGURED')
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 8_000)
+
+  try {
+    const upstreamResponse = await fetch(upstreamConfig.upstreamUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'session.getPublic',
+        apiSecret: upstreamConfig.appsScriptApiSecret,
+        data: { joinCode },
+      }),
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+
+    if (!upstreamResponse.ok) {
+      return errorResponse(502, 'UPSTREAM_ERROR')
+    }
+
+    let payload: unknown
+
+    try {
+      payload = await upstreamResponse.json()
+    } catch {
+      return errorResponse(502, 'UPSTREAM_ERROR')
+    }
+
+    if (
+      isPlainObject(payload) &&
+      payload.ok === false &&
+      payload.error === 'SESSION_NOT_FOUND'
+    ) {
+      return errorResponse(404, 'SESSION_NOT_FOUND')
+    }
+
+    if (
+      !isPlainObject(payload) ||
+      payload.ok !== true ||
+      !isPlainObject(payload.data)
+    ) {
+      return errorResponse(502, 'UPSTREAM_ERROR')
+    }
+
+    const session = selectPublicSessionData(payload.data)
+
+    if (!session || session.joinCode !== joinCode) {
+      return errorResponse(502, 'UPSTREAM_ERROR')
+    }
+
+    return jsonResponse({ ok: true, data: session }, 200)
+  } catch {
+    if (controller.signal.aborted) {
+      return errorResponse(504, 'UPSTREAM_TIMEOUT')
+    }
+
+    return errorResponse(502, 'UPSTREAM_ERROR')
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
 export default {
   async fetch(request: Request) {
-    if (request.method !== 'POST') {
-      return errorResponse(405, 'METHOD_NOT_ALLOWED', { Allow: 'POST' })
+    if (request.method === 'GET') {
+      return getPublicSession(request)
     }
 
-    const serverConfig = getServerConfig()
+    if (request.method !== 'POST') {
+      return errorResponse(405, 'METHOD_NOT_ALLOWED', { Allow: 'GET, POST' })
+    }
 
-    if (!serverConfig) {
+    const upstreamConfig = getUpstreamConfig()
+    const sessionAdminSecret = getSessionAdminSecret()
+
+    if (!upstreamConfig || !sessionAdminSecret) {
       return errorResponse(500, 'SERVER_MISCONFIGURED')
     }
 
     if (
       request.headers.get('authorization') !==
-      `Bearer ${serverConfig.sessionAdminApiSecret}`
+      `Bearer ${sessionAdminSecret}`
     ) {
       return errorResponse(401, 'UNAUTHORIZED')
     }
@@ -196,12 +312,12 @@ export default {
     const timeout = setTimeout(() => controller.abort(), 8_000)
 
     try {
-      const upstreamResponse = await fetch(serverConfig.upstreamUrl, {
+      const upstreamResponse = await fetch(upstreamConfig.upstreamUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'session.create',
-          apiSecret: serverConfig.appsScriptApiSecret,
+          apiSecret: upstreamConfig.appsScriptApiSecret,
           data: input,
         }),
         cache: 'no-store',
@@ -220,7 +336,7 @@ export default {
         return errorResponse(502, 'UPSTREAM_ERROR')
       }
 
-      const session = selectSessionPayload(payload)
+      const session = selectCreatedSessionPayload(payload)
 
       if (
         !session ||
