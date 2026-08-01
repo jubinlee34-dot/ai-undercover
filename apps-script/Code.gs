@@ -331,6 +331,9 @@ function doPost(e) {
           data: createSession_(body.data),
         });
 
+      case 'session.getPublic':
+        return getPublicSessionResponse_(body.data);
+
       default:
         return jsonResponse_({
           ok: false,
@@ -340,6 +343,46 @@ function doPost(e) {
   } catch (error) {
     return errorResponse_(error);
   }
+}
+
+/**
+ * 참여 코드 기반 공개 수업방 조회
+ */
+function getPublicSessionResponse_(data) {
+  const joinCode =
+    data && typeof data.joinCode === 'string'
+      ? data.joinCode.trim().toUpperCase()
+      : '';
+
+  if (!/^[A-F0-9]{6}$/.test(joinCode)) {
+    throw new Error('Invalid join code.');
+  }
+
+  const session = readRowsAsObjects_('SESSIONS').find(function (row) {
+    return (
+      String(row.join_code || '').trim().toUpperCase() === joinCode
+    );
+  });
+
+  if (!session) {
+    return jsonResponse_({
+      ok: false,
+      error: 'SESSION_NOT_FOUND',
+    });
+  }
+
+  return jsonResponse_({
+    ok: true,
+    data: {
+      sessionId: String(session.session_id),
+      joinCode: String(session.join_code).trim().toUpperCase(),
+      title: String(session.title),
+      status: String(session.status),
+      currentPhase: String(session.current_phase),
+      currentRound: Number(session.current_round),
+      maxTeams: Number(session.max_teams),
+    },
+  });
 }
 
 /**
