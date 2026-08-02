@@ -1,7 +1,7 @@
 declare const process: {
   env: {
-    APPS_SCRIPT_WEB_APP_URL?: string
-    APPS_SCRIPT_API_SECRET?: string
+    APPS_SCRIPT_DB_WEB_APP_URL?: string
+    APPS_SCRIPT_DB_API_SECRET?: string
     SESSION_ADMIN_API_SECRET?: string
   }
 }
@@ -69,8 +69,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function getUpstreamConfig() {
-  const configuredUrl = process.env.APPS_SCRIPT_WEB_APP_URL
-  const appsScriptApiSecret = process.env.APPS_SCRIPT_API_SECRET
+  const configuredUrl = process.env.APPS_SCRIPT_DB_WEB_APP_URL
+  const appsScriptApiSecret = process.env.APPS_SCRIPT_DB_API_SECRET
 
   if (!configuredUrl || !appsScriptApiSecret) {
     return null
